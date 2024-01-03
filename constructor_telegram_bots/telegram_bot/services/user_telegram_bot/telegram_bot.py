@@ -1,112 +1,154 @@
-from aiogram import types
-from aiogram.utils.exceptions import ValidationError, Unauthorized
+from ..core import BaseTelegramBot
 
-from telegram_bot.services.custom_aiogram import CustomBot, CustomDispatcher
+from aiogram.types import (
+	Chat,
+	Message,
+	CallbackQuery,
+	FSInputFile,
+	BotCommand,
+	ReplyKeyboardMarkup,
+	InlineKeyboardMarkup,
+)
+from aiogram.utils.backoff import BackoffConfig
+from aiogram.exceptions import (
+	TelegramRetryAfter,
+	TelegramForbiddenError,
+	TelegramNotFound,
+)
 
-from telegram_bot.models import TelegramBot, TelegramBotCommand
+from ...models import (
+	TelegramBot as DjangoTelegramBot,
+	TelegramBotCommand as DjangoTelegramBotCommand,
+	TelegramBotCommandCommand as DjangoTelegramBotCommandCommand,
+)
 
-from .decorators import *
-from .functions import get_telegram_keyboard
+from .middlewares import (
+	CreateDjangoTelegramBotUserMiddleware,
+	CheckDjangoTelegramBotUserIsAllowedMiddleware,
+	GenerateJinjaVariablesMiddleware,
+	SearchDjangoTelegramBotCommandMiddleware,
+	MakeDjangoTelegramBotCommandApiRequestMiddleware,
+	InsertDjangoTelegramBotCommandDatabaseRecordToDatabaseMiddleware,
+	GetDjangoTelegramBotCommandMessageTextMiddleware,
+	GetDjangoTelegramBotCommandKeyboardMiddleware,
+)
 
 import asyncio
-from aiohttp import ClientSession
-
-from typing import Optional, Union
-
-
-PARSE_MODE = 'HTML'
+import string
+import re
 
 
-class UserTelegramBot:
-	def __init__(self, telegram_bot: TelegramBot) -> None:
-		self.loop = asyncio.new_event_loop()
-		self.telegram_bot = telegram_bot
+class UserTelegramBot(BaseTelegramBot):
+	def __init__(self, django_telegram_bot: DjangoTelegramBot) -> None:
+		self.django_telegram_bot = django_telegram_bot
 
-	@check_request
-	@check_telegram_bot_user
-	@check_telegram_bot_command
-	@check_telegram_bot_command_database_record
-	@check_message_text
-	async def message_and_callback_query_handler(
+		super().__init__(self.django_telegram_bot.api_token, 'html')
+
+	async def send_answer(
 		self,
-		message: types.Message,
-		callback_query: Optional[types.CallbackQuery],
-		telegram_bot_command: TelegramBotCommand,
-		message_text: str
+		event_chat: Chat,
+		message_text: str,
+		keyboard: ReplyKeyboardMarkup | InlineKeyboardMarkup | None,
+		django_telegram_bot_command: DjangoTelegramBotCommand,
+		**kwargs,
 	) -> None:
-		telegram_keyboard: Union[types.ReplyKeyboardMarkup, types.InlineKeyboardMarkup] = await get_telegram_keyboard(telegram_bot_command)
+		async def send_answer_() -> None:
+			try:
+				if django_telegram_bot_command.image:
+					await self.bot.send_photo(
+						chat_id=event_chat.id,
+						photo=FSInputFile(django_telegram_bot_command.image.path),
+						caption=message_text,
+						reply_markup=keyboard,
+					)
+				else:
+					await self.bot.send_message(
+						chat_id=event_chat.id,
+						text=message_text,
+						reply_markup=keyboard,
+					)
+			except TelegramRetryAfter as exception:
+				await asyncio.sleep(exception.retry_after)
+				await send_answer_()
+			except TelegramForbiddenError:
+				pass
+			except TelegramNotFound:
+				try:
+					await self.bot.send_message(chat_id=event_chat.id, text='Oops, something went wrong!')
+				except TelegramNotFound:
+					pass
 
+		await send_answer_()
+
+	async def message_handler(self, event: Message, **kwargs) -> None:
+		await self.send_answer(**kwargs)
+
+	async def callback_query_handler(self, event: CallbackQuery, **kwargs) -> None:
 		try:
-			if callback_query:
-				await self.dispatcher.bot.delete_message(
-					chat_id=message.chat.id,
-					message_id=message.message_id
-				)
+			if event.message is not None:
+				await event.message.delete()
+		except TelegramNotFound:
+			pass
 
-			if not telegram_bot_command.image:
-				await self.dispatcher.bot.send_message(
-					chat_id=message.chat.id,
-					text=message_text,
-					parse_mode=PARSE_MODE,
-					reply_markup=telegram_keyboard
-				)
-			else:
-				await self.dispatcher.bot.send_photo(
-					chat_id=message.chat.id,
-					photo=types.InputFile(telegram_bot_command.image.path),
-					caption=message_text,
-					parse_mode=PARSE_MODE,
-					reply_markup=telegram_keyboard
-				)
-		except FileNotFoundError:
-			telegram_bot_command.image = None
-			await telegram_bot_command.asave()
-
-			await self.dispatcher.bot.send_message(
-				chat_id=message.chat.id,
-				text=message_text,
-				parse_mode=PARSE_MODE,
-				reply_markup=telegram_keyboard
-			)
-		except Exception as exception:
-			await self.dispatcher.bot.send_message(
-				chat_id=message.chat.id,
-				text=f'<b>Error</b>: {exception}',
-				parse_mode=PARSE_MODE,
-				reply_markup=telegram_keyboard
-			)
+		await self.send_answer(**kwargs)
 
 	async def setup(self) -> None:
-		self.bot = CustomBot(token=self.telegram_bot.api_token, loop=self.loop)
-		self.dispatcher = CustomDispatcher(bot_username=self.telegram_bot.username, bot=self.bot)
+		bot_commands = []
 
-		self.dispatcher.register_message_handler(self.message_and_callback_query_handler)
-		self.dispatcher.register_callback_query_handler(self.message_and_callback_query_handler)
+		async for django_telegram_bot_command in self.django_telegram_bot.commands.all():
+			django_telegram_bot_command_command: DjangoTelegramBotCommandCommand | None = await django_telegram_bot_command.aget_command()
+
+			if (
+				django_telegram_bot_command_command is not None and
+				django_telegram_bot_command_command.is_show_in_menu and
+				django_telegram_bot_command_command.description
+			):
+				bot_commands.append(BotCommand(
+					command=re.sub(f'[{string.punctuation}]', '', django_telegram_bot_command_command.text),
+					description=django_telegram_bot_command_command.description,
+				))
+
+		await self.bot.set_my_commands(bot_commands)
+
+		args = (self.django_telegram_bot,)
+
+		self.dispatcher.update.outer_middleware.register(CreateDjangoTelegramBotUserMiddleware(*args))
+		self.dispatcher.update.outer_middleware.register(CheckDjangoTelegramBotUserIsAllowedMiddleware(*args))
+		self.dispatcher.update.outer_middleware.register(GenerateJinjaVariablesMiddleware(*args))
+		self.dispatcher.update.outer_middleware.register(SearchDjangoTelegramBotCommandMiddleware(*args))
+		self.dispatcher.update.outer_middleware.register(MakeDjangoTelegramBotCommandApiRequestMiddleware(*args))
+		self.dispatcher.update.outer_middleware.register(InsertDjangoTelegramBotCommandDatabaseRecordToDatabaseMiddleware(*args))
+		self.dispatcher.update.outer_middleware.register(GetDjangoTelegramBotCommandMessageTextMiddleware(*args))
+		self.dispatcher.update.outer_middleware.register(GetDjangoTelegramBotCommandKeyboardMiddleware(*args))
+
+		self.dispatcher.message.register(self.message_handler)
+		self.dispatcher.callback_query.register(self.callback_query_handler)
 
 	async def start(self) -> None:
-		task = self.loop.create_task(self.stop())
+		self.loop.create_task(self.stop())
 
-		try:
-			await self.dispatcher.skip_updates()
-			await self.dispatcher.start_polling()
+		await self.setup()
+		await self.dispatcher.start_polling(
+			self.bot,
+			backoff_config=BackoffConfig(
+				min_delay=1,
+				max_delay=3600,
+				factor=2.5,
+				jitter=0.1,
+			),
+			handle_signals=False,
+		)
 
-			task.cancel()
-
-			self.telegram_bot.is_stopped = True
-			await self.telegram_bot.asave()
-		except (ValidationError, Unauthorized):
-			task.cancel()
-
-			await self.telegram_bot.adelete()
-
-		session: ClientSession = await self.bot.get_session()
-		await session.close()
+		self.django_telegram_bot.is_stopped = True
+		await self.django_telegram_bot.asave()
 
 	async def stop(self) -> None:
-		while self.telegram_bot.is_running:
-			self.telegram_bot: TelegramBot = await TelegramBot.objects.aget(id=self.telegram_bot.id)
+		while self.django_telegram_bot.is_running:
+			try:
+				await self.django_telegram_bot.arefresh_from_db()
+			except DjangoTelegramBot.DoesNotExist:
+				break
 
-			if not self.telegram_bot.is_running:
-				self.dispatcher.stop_polling()
-			else:
-				await asyncio.sleep(30)
+			await asyncio.sleep(10)
+
+		await self.dispatcher.stop_polling()

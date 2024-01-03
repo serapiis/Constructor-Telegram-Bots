@@ -4,28 +4,31 @@ from .functions import generate_random_string
 
 from dotenv import load_dotenv
 from pathlib import Path
+import string
 import sys
 import os
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR: Path = Path(__file__).resolve().parent.parent
 
 
 load_dotenv()
 
-SECRET_KEY = os.getenv('SECRET_KEY', f"django-insecure-{generate_random_string(length=50, chars='abcdefghijklnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890!@#$%^&*()_')}")
-DEBUG = os.getenv('DEBUG', 'False') == 'True'
+SECRET_KEY: str = os.getenv('SECRET_KEY', f'django-insecure-{generate_random_string(length=50, chars=string.ascii_letters + string.digits)}')
+DEBUG: bool = os.getenv('DEBUG', 'True') == 'True'
+DEBUG_ENVIRONMENT: bool = os.getenv('DEBUG_ENVIRONMENT', 'True') == 'True'
 
-try:
-	TEST = sys.argv[0] == 'manage.py' and sys.argv[1] == 'test'
-except:
-	TEST = False
+match sys.argv:
+	case ['manage.py', 'test', *extra_options]:
+		TEST = True
+	case _:
+		TEST = False
 
-CONSTRUCTOR_TELEGRAM_BOT_API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-CONSTRUCTOR_TELEGRAM_BOT_USERNAME = os.getenv('TELEGRAM_BOT_USERNAME')
+CONSTRUCTOR_TELEGRAM_BOT_API_TOKEN: str | None = os.getenv('TELEGRAM_BOT_TOKEN')
+CONSTRUCTOR_TELEGRAM_BOT_USERNAME: str | None = os.getenv('TELEGRAM_BOT_USERNAME')
 
 
-SITE_DOMAIN = 'http://127.0.0.1:8000/' if DEBUG else 'https://constructor.exg1o.org/'
+SITE_DOMAIN = 'http://127.0.0.1:8000' if DEBUG else 'https://constructor.exg1o.org'
 ALLOWED_HOSTS = ['127.0.0.1', 'constructor.exg1o.org']
 CSRF_TRUSTED_ORIGINS = [
 	'http://*.127.0.0.1',
@@ -43,7 +46,7 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_BEAT_SCHEDULE = {
 	'check_users_first_name_schedule' : {
 		'task': 'user.tasks.check_users_first_name',
-		'schedule': 86400, # 60 * 60 * 24 = 86400 секунд
+		'schedule': 86400, # 60 сек. * 60 мин. * 24 ч. = 86400 сек.
 	},
 }
 
@@ -51,10 +54,13 @@ CELERY_BEAT_SCHEDULE = {
 INSTALLED_APPS = [
 	'rest_framework',
 	'rest_framework.authtoken',
+	'drf_standardized_errors',
+
+	'admin_interface',
+	'colorfield',
 
 	'modeltranslation',
-	'django_json_widget',
-	'ckeditor',
+	'tinymce',
 
 	'django.contrib.admin',
 	'django.contrib.auth',
@@ -70,10 +76,33 @@ INSTALLED_APPS = [
 	'instruction',
 	'donation',
 	'personal_cabinet',
+	'telegram_bot_menu',
 	'telegram_bot',
 	'plugin',
 	'privacy_policy',
 ]
+
+TINYMCE_DEFAULT_CONFIG = {
+	'theme': 'silver',
+	'menubar': True,
+	'height': 420,
+	'plugins': (
+		'advlist, autolink, lists, link, image, charmap,'
+		'print, preview, anchor, searchreplace, visualblocks,'
+		'code, fullscreen, insertdatetime, media, table, paste,'
+		'help, wordcount'
+	),
+	'toolbar': (
+		'undo redo | '
+		'formatselect | '
+		'bold italic backcolor | '
+		'alignleft aligncenter alignright alignjustify | '
+		'bullist numlist outdent indent | '
+		'removeformat | '
+		'help'
+	),
+}
+
 
 MIDDLEWARE = [
 	'django.middleware.security.SecurityMiddleware',
@@ -91,14 +120,20 @@ REST_FRAMEWORK = {
 		'rest_framework.authentication.BasicAuthentication',
 		'rest_framework.authentication.SessionAuthentication',
 	],
+	'EXCEPTION_HANDLER': 'drf_standardized_errors.handler.exception_handler',
+}
+DRF_STANDARDIZED_ERRORS = {
+	'EXCEPTION_FORMATTER_CLASS': 'constructor_telegram_bots.exception_formatter.CustomExceptionFormatter',
 }
 
-ROOT_URLCONF = 'constructor_telegram_bots.urls'
 
 TEMPLATES = [
 	{
 		'BACKEND': 'django.template.backends.django.DjangoTemplates',
-		'DIRS': [BASE_DIR / 'templates'],
+		'DIRS': [
+			BASE_DIR / 'templates',
+			BASE_DIR / 'constructor_telegram_bots/templates',
+		],
 		'APP_DIRS': True,
 		'OPTIONS': {
 			'context_processors': [
@@ -107,77 +142,57 @@ TEMPLATES = [
 				'django.contrib.auth.context_processors.auth',
 				'django.contrib.messages.context_processors.messages',
 
-				'constructor_telegram_bots.context_processors.add_constructor_telegram_bot_username',
-				'user.context_processors.users',
-				'telegram_bot.context_processors.telegram_bots',
-				'team.context_processors.team_members',
-				'updates.context_processors.updates',
-				'instruction.context_processors.instruction_sections',
-				'donation.context_processors.donations',
+				'constructor_telegram_bots.context_processors.constructor_telegram_bot_username',
 			],
 		},
 	}
 ]
 
 
+AUTH_USER_MODEL = 'user.User'
+ROOT_URLCONF = 'constructor_telegram_bots.urls'
 WSGI_APPLICATION = 'constructor_telegram_bots.wsgi.application'
 
 
-AUTH_USER_MODEL = 'user.User'
-
-if sys.argv[0] == 'manage.py' and sys.argv[1] == 'test':
-	DATABASES = {
-		'default': {
-			'ENGINE': 'django.db.backends.sqlite3',
-			'NAME': BASE_DIR / 'DataBase.db',
-		},
-	}
-else:
-	DATABASES = {
-		'default': {
-			'ENGINE': 'django.db.backends.postgresql',
-			'NAME': os.getenv('POSTGRESQL_DATABASE_NAME'), 
-			'USER': os.getenv('POSTGRESQL_DATABASE_USER'),
-			'PASSWORD': os.getenv('POSTGRESQL_DATABASE_PASSWORD'),
-			'HOST': '127.0.0.1', 
-			'PORT': '5432',
-		},
-	}
-
+DATABASES = {
+	'default': {
+		'ENGINE': 'django.db.backends.postgresql',
+		'NAME': os.getenv('POSTGRESQL_DATABASE_NAME'),
+		'USER': os.getenv('POSTGRESQL_DATABASE_USER'),
+		'PASSWORD': os.getenv('POSTGRESQL_DATABASE_PASSWORD'),
+		'HOST': '127.0.0.1', 
+		'PORT': '5432',
+	},
+}
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-# Languages
 USE_I18N = True
 USE_L10N = True
 
-LANGUAGE_CODE = 'ru-ru'
-LANGUAGES = (
+LANGUAGES = [
 	('en', _('Английский')),
 	('uk', _('Украинский')),
 	('ru', _('Русский')),
-)
+]
+LANGUAGE_CODE = 'ru-ru'
 MODELTRANSLATION_DEFAULT_LANGUAGE = 'ru'
+LOCALE_PATHS = [BASE_DIR / 'locale']
 
-LOCALE_PATHS = (BASE_DIR / 'locale',)
 
-
-# Timezone
 TIME_ZONE = 'UTC'
 USE_TZ = True
 
 
 STATIC_URL = '/static/'
-if DEBUG:
-	STATICFILES_DIRS = [
-		BASE_DIR / 'static/',
-	]
-else:
-	STATIC_ROOT = BASE_DIR / 'static/'
+STATIC_ROOT = BASE_DIR / 'static'
+STATICFILES_DIRS = [BASE_DIR / 'constructor_telegram_bots/static']
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 
-if os.path.exists(BASE_DIR / 'logs') is False:
-	os.mkdir(BASE_DIR / 'logs')
+os.makedirs(BASE_DIR / 'logs', exist_ok=True)
 
 LOGGING = {
 	'version': 1,
